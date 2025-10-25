@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Attendify Face Recognition Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    #logs { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: auto; }
+    button { margin: 5px; padding: 10px; }
+    video, canvas { border: 1px solid #000; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Attendify Face Recognition Test</h1>
+
+  <button onclick="connectWS()">Connect WebSocket</button>
+  <button onclick="captureAndRegister()">Register</button>
+  <button onclick="captureAndVerify()">Verify</button>
+  <div id="logs"></div>
+
+  <video id="video" width="320" height="240" autoplay></video>
+  <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+
+  <script>
+    let ws;
+
+    function log(msg) {
+      const logs = document.getElementById("logs");
+      logs.innerHTML += msg + "<br>";
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    // Get camera
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        document.getElementById("video").srcObject = stream;
+      });
+
+    function captureBase64Image() {
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg");
+    }
+
+    function connectWS() {
+      ws = new WebSocket("https://81a980dd739e.ngrok-free.app/ws/face"); // Adjust host if deployed
+      ws.onopen = () => log("✅ WebSocket connected");
+      ws.onmessage = evt => {
+        log("📩 " + evt.data);
+      };
+      ws.onclose = () => log("❌ WebSocket closed");
+    }
+
+    function captureAndRegister() {
+      if (!ws) return log("⚠️ Connect WS first!");
+      const faceImage = captureBase64Image();
+      const payload = {
+        action: "register",
+        fullName: "Test User",
+        email: "test@example.com",
+        employeeId: "EMP009",
+        department: "Engineering",
+        role: "Developer",
+        faceImage: faceImage
+      };
+      ws.send(JSON.stringify(payload));
+      log("📤 Sent register request");
+    }
+
+    function captureAndVerify() {
+      if (!ws) return log("⚠️ Connect WS first!");
+      const faceImage = captureBase64Image();
+      const payload = {
+        action: "verify",
+        userId: "EMP009", // you can also use generated userId from registration
+        faceImage: faceImage,
+        latitude: 28.61,
+        longitude: 77.23
+      };
+      ws.send(JSON.stringify(payload));
+      log("📤 Sent verify request");
+    }
+  </script>
+</body>
+</html>
