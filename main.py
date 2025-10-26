@@ -11,6 +11,7 @@ from PIL import Image
 import numpy as np
 from deepface import DeepFace
 import cv2
+import os
 
 # ==============================
 # App + Config
@@ -25,10 +26,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MONGODB_URL = (
-    "mongodb+srv://Krishna:Krish%40atlas25@attendify-cluster."
-    "fh96zp0.mongodb.net/attendifyDB?retryWrites=true&w=majority"
-)
+MONGODB_URL = os.getenv("MONGODB_URL")
+
 client = AsyncIOMotorClient(MONGODB_URL)
 db = client.attendifyDB
 
