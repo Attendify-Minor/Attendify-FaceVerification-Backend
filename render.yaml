@@ -2,7 +2,11 @@ services:
   - type: web
     name: attendify-face-backend
     env: python
-    buildCommand: PYTHON_VERSION=3.10.14 pip install -r requirements.txt
+    buildCommand: |
+      pyenv install -s 3.10.14
+      pyenv global 3.10.14
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port=$PORT
     envVars:
       - key: MONGODB_URL
