@@ -171,25 +171,39 @@ async def save_employee_face(request: SaveFaceRequest):
     try:
         # Check if employee already exists
         existing = await face_encodings_collection.find_one({"employeeId": request.employeeId})
-        if existing:
-            return SaveFaceResponse(
-                success=False,
-                message="Employee face data already exists",
-                employeeId=request.employeeId
-            )
-        
+
         # Decode and process the image
         image_array = decode_base64_image(request.faceImage)
         embedding = extract_face_embedding(image_array)
-        
+
         if not embedding:
             return SaveFaceResponse(
                 success=False,
                 message="No face detected in the image",
                 employeeId=request.employeeId
             )
-        
-        # Save face encoding to database
+
+        # If existing, update the record; otherwise insert a new one
+        if existing:
+            new_version = existing.get("version", 1) + 1
+            await face_encodings_collection.update_one(
+                {"employeeId": request.employeeId},
+                {"$set": {
+                    "embedding": embedding,
+                    "originalImage": request.faceImage,
+                    "model": FACE_MODEL,
+                    "updatedAt": datetime.utcnow(),
+                    "version": new_version,
+                }}
+            )
+
+            return SaveFaceResponse(
+                success=True,
+                message="Face data updated successfully",
+                employeeId=request.employeeId
+            )
+
+        # Save face encoding to database (new employee)
         await face_encodings_collection.insert_one({
             "employeeId": request.employeeId,
             "embedding": embedding,
@@ -198,7 +212,7 @@ async def save_employee_face(request: SaveFaceRequest):
             "createdAt": datetime.utcnow(),
             "version": 1,
         })
-        
+
         return SaveFaceResponse(
             success=True,
             message="Face data saved successfully",
@@ -294,9 +308,6 @@ async def websocket_face(websocket: WebSocket):
                         continue
 
                     existing = await face_encodings_collection.find_one({"employeeId": employeeId})
-                    if existing:
-                        await websocket.send_json({"success": False, "message": "Employee face data already exists"})
-                        continue
 
                     image_array = decode_base64_image(face_b64)
                     embedding = extract_face_embedding(image_array)
@@ -304,21 +315,41 @@ async def websocket_face(websocket: WebSocket):
                         await websocket.send_json({"success": False, "message": "No face detected"})
                         continue
 
-                    await face_encodings_collection.insert_one({
-                        "employeeId": employeeId,
-                        "embedding": embedding,
-                        "originalImage": face_b64,  # Store original base64 image
-                        "model": FACE_MODEL,
-                        "createdAt": datetime.utcnow(),
-                        "version": 1,
-                    })
+                    if existing:
+                        new_version = existing.get("version", 1) + 1
+                        await face_encodings_collection.update_one(
+                            {"employeeId": employeeId},
+                            {"$set": {
+                                "embedding": embedding,
+                                "originalImage": face_b64,
+                                "model": FACE_MODEL,
+                                "updatedAt": datetime.utcnow(),
+                                "version": new_version,
+                            }}
+                        )
 
-                    await websocket.send_json({
-                        "success": True,
-                        "action": "save",
-                        "message": "Face data saved successfully",
-                        "employeeId": employeeId,
-                    })
+                        await websocket.send_json({
+                            "success": True,
+                            "action": "save",
+                            "message": "Face data updated successfully",
+                            "employeeId": employeeId,
+                        })
+                    else:
+                        await face_encodings_collection.insert_one({
+                            "employeeId": employeeId,
+                            "embedding": embedding,
+                            "originalImage": face_b64,  # Store original base64 image
+                            "model": FACE_MODEL,
+                            "createdAt": datetime.utcnow(),
+                            "version": 1,
+                        })
+
+                        await websocket.send_json({
+                            "success": True,
+                            "action": "save",
+                            "message": "Face data saved successfully",
+                            "employeeId": employeeId,
+                        })
                 except Exception as e:
                     await websocket.send_json(
                         {"success": False, "action": "save", "message": str(e)}
