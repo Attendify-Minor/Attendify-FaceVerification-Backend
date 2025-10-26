@@ -1,13 +1,8 @@
 services:
   - type: web
     name: attendify-face-backend
-    env: python
-    buildCommand: |
-      pyenv install -s 3.10.14
-      pyenv global 3.10.14
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port=$PORT
+    env: docker
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: MONGODB_URL
         sync: false
