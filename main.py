@@ -11,6 +11,7 @@ from PIL import Image
 import numpy as np
 from deepface import DeepFace
 import cv2
+import os
 
 # ==============================
 # App + Config
@@ -25,14 +26,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MONGODB_URL = (
-    "mongodb+srv://Krishna:Krish%40atlas25@attendify-cluster."
-    "fh96zp0.mongodb.net/attendifyDB?retryWrites=true&w=majority"
-)
+MONGODB_URL = os.getenv("MONGODB_URL")
+
 client = AsyncIOMotorClient(MONGODB_URL)
 db = client.attendifyDB
 
-users_collection = db.users
 face_encodings_collection = db.face_encodings
 verification_logs_collection = db.verification_logs
 
@@ -48,29 +46,24 @@ DEBUG_SAVE_FRAMES = False  # set True if you want debug images
 # ==============================
 # Models
 # ==============================
-class RegistrationRequest(BaseModel):
-    fullName: str
-    email: EmailStr
+class SaveFaceRequest(BaseModel):
     employeeId: str
-    department: str
-    role: str
     faceImage: str
-    timestamp: datetime
 
-class VerificationRequest(BaseModel):
-    userId: str
+class VerifyFaceRequest(BaseModel):
+    employeeId: str
     faceImage: str
-    timestamp: datetime
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
 
-class VerificationResponse(BaseModel):
+class SaveFaceResponse(BaseModel):
+    success: bool
+    message: str
+    employeeId: str
+
+class VerifyFaceResponse(BaseModel):
     success: bool
     confidence: float
     message: str
-    userId: str
-    timestamp: datetime
-    matchedUser: Optional[dict] = None
+    employeeId: str
 
 # ==============================
 # Utilities
@@ -146,10 +139,9 @@ def generate_user_id(employee_id: str, email: str) -> str:
 # ==============================
 @app.on_event("startup")
 async def startup():
-    await users_collection.create_index("employeeId", unique=True)
-    await users_collection.create_index("email", unique=True)
-    await face_encodings_collection.create_index("userId")
-    await verification_logs_collection.create_index("userId")
+    await face_encodings_collection.create_index("employeeId", unique=True)
+    await verification_logs_collection.create_index("employeeId")
+    await verification_logs_collection.create_index("timestamp")
     logger.info("✅ Database ready")
     logger.info(f"✅ Model: {FACE_MODEL}, Detector: {DETECTOR_BACKEND}")
 
@@ -170,16 +162,116 @@ async def root():
         "detector": DETECTOR_BACKEND,
     }
 
-@app.post("/api/register", status_code=201)
-async def register_user(request: RegistrationRequest):
-    return {"message": "Use WebSocket for registration in v2.0"}
+@app.post("/api/save-face", response_model=SaveFaceResponse)
+async def save_employee_face(request: SaveFaceRequest):
+    """
+    Save employee face data to database
+    """
+    try:
+        # Check if employee already exists
+        existing = await face_encodings_collection.find_one({"employeeId": request.employeeId})
+        if existing:
+            return SaveFaceResponse(
+                success=False,
+                message="Employee face data already exists",
+                employeeId=request.employeeId
+            )
+        
+        # Decode and process the image
+        image_array = decode_base64_image(request.faceImage)
+        embedding = extract_face_embedding(image_array)
+        
+        if not embedding:
+            return SaveFaceResponse(
+                success=False,
+                message="No face detected in the image",
+                employeeId=request.employeeId
+            )
+        
+        # Save face encoding to database
+        await face_encodings_collection.insert_one({
+            "employeeId": request.employeeId,
+            "embedding": embedding,
+            "originalImage": request.faceImage,  # Store original base64 image
+            "model": FACE_MODEL,
+            "createdAt": datetime.utcnow(),
+            "version": 1,
+        })
+        
+        return SaveFaceResponse(
+            success=True,
+            message="Face data saved successfully",
+            employeeId=request.employeeId
+        )
+        
+    except Exception as e:
+        logger.error(f"Save face error: {str(e)}")
+        return SaveFaceResponse(
+            success=False,
+            message=f"Error saving face data: {str(e)}",
+            employeeId=request.employeeId
+        )
 
-@app.post("/api/verify", response_model=VerificationResponse)
-async def verify_user(request: VerificationRequest):
-    return {"message": "Use WebSocket for verification in v2.0"}
+@app.post("/api/verify-face", response_model=VerifyFaceResponse)
+async def verify_employee_face(request: VerifyFaceRequest):
+    """
+    Verify employee face against stored data
+    """
+    try:
+        # Get stored face encoding
+        stored = await face_encodings_collection.find_one({"employeeId": request.employeeId})
+        if not stored:
+            return VerifyFaceResponse(
+                success=False,
+                confidence=0.0,
+                message="Employee face data not found",
+                employeeId=request.employeeId
+            )
+        
+        # Decode and process the current image
+        image_array = decode_base64_image(request.faceImage)
+        current_embedding = extract_face_embedding(image_array)
+        
+        if not current_embedding:
+            return VerifyFaceResponse(
+                success=False,
+                confidence=0.0,
+                message="No face detected in the image",
+                employeeId=request.employeeId
+            )
+        
+        # Calculate similarity
+        distance = calculate_distance(stored["embedding"], current_embedding)
+        confidence = max(0, 1 - distance)
+        is_verified = distance <= VERIFICATION_THRESHOLD
+        
+        # Log verification attempt
+        await verification_logs_collection.insert_one({
+            "employeeId": request.employeeId,
+            "timestamp": datetime.utcnow(),
+            "success": is_verified,
+            "confidence": float(confidence),
+            "distance": float(distance),
+        })
+        
+        return VerifyFaceResponse(
+            success=is_verified,
+            confidence=round(confidence * 100, 2),
+            message="Verification successful" if is_verified else "Verification failed",
+            employeeId=request.employeeId
+        )
+        
+    except Exception as e:
+        logger.error(f"Verify face error: {str(e)}")
+        return VerifyFaceResponse(
+            success=False,
+            confidence=0.0,
+            message=f"Error during verification: {str(e)}",
+            employeeId=request.employeeId
+        )
 
 # ==============================
-# WebSocket Endpoint
+# WebSocket Endpoint (Simplified)
 # ==============================
 @app.websocket("/ws/face")
 async def websocket_face(websocket: WebSocket):
@@ -190,25 +282,19 @@ async def websocket_face(websocket: WebSocket):
             data = json.loads(raw)
             action = data.get("action")
 
-            # ---------------- REGISTER ----------------
-            if action == "register":
+            # ---------------- SAVE FACE ----------------
+            if action == "save":
                 try:
-                    fullName = data.get("fullName")
-                    email = data.get("email")
                     employeeId = data.get("employeeId")
-                    department = data.get("department")
-                    role = data.get("role")
                     face_b64 = data.get("faceImage")
 
-                    if not all([fullName, email, employeeId, department, role, face_b64]):
+                    if not employeeId or not face_b64:
                         await websocket.send_json({"success": False, "message": "Missing fields"})
                         continue
 
-                    existing = await users_collection.find_one(
-                        {"$or": [{"employeeId": employeeId}, {"email": email}]}
-                    )
+                    existing = await face_encodings_collection.find_one({"employeeId": employeeId})
                     if existing:
-                        await websocket.send_json({"success": False, "message": "User already exists"})
+                        await websocket.send_json({"success": False, "message": "Employee face data already exists"})
                         continue
 
                     image_array = decode_base64_image(face_b64)
@@ -217,21 +303,10 @@ async def websocket_face(websocket: WebSocket):
                         await websocket.send_json({"success": False, "message": "No face detected"})
                         continue
 
-                    user_id = generate_user_id(employeeId, email)
-                    await users_collection.insert_one({
-                        "userId": user_id,
-                        "fullName": fullName,
-                        "email": email,
-                        "employeeId": employeeId,
-                        "department": department,
-                        "role": role,
-                        "registeredAt": datetime.utcnow(),
-                        "isActive": True,
-                        "lastVerified": None,
-                    })
                     await face_encodings_collection.insert_one({
-                        "userId": user_id,
+                        "employeeId": employeeId,
                         "embedding": embedding,
+                        "originalImage": face_b64,  # Store original base64 image
                         "model": FACE_MODEL,
                         "createdAt": datetime.utcnow(),
                         "version": 1,
@@ -239,38 +314,28 @@ async def websocket_face(websocket: WebSocket):
 
                     await websocket.send_json({
                         "success": True,
-                        "action": "register",
-                        "message": "Registration successful ✅",
-                        "userId": user_id,
+                        "action": "save",
+                        "message": "Face data saved successfully",
                         "employeeId": employeeId,
                     })
                 except Exception as e:
                     await websocket.send_json(
-                        {"success": False, "action": "register", "message": str(e)}
+                        {"success": False, "action": "save", "message": str(e)}
                     )
 
-            # ---------------- VERIFY ----------------
+            # ---------------- VERIFY FACE ----------------
             elif action == "verify":
                 try:
-                    user_id = data.get("userId")
+                    employeeId = data.get("employeeId")
                     face_b64 = data.get("faceImage")
-                    latitude = data.get("latitude")
-                    longitude = data.get("longitude")
 
-                    if not user_id or not face_b64:
+                    if not employeeId or not face_b64:
                         await websocket.send_json({"success": False, "message": "Missing fields"})
                         continue
 
-                    user = await users_collection.find_one(
-                        {"$or": [{"userId": user_id}, {"employeeId": user_id}]}
-                    )
-                    if not user:
-                        await websocket.send_json({"success": False, "message": "User not found"})
-                        continue
-
-                    stored = await face_encodings_collection.find_one({"userId": user["userId"]})
+                    stored = await face_encodings_collection.find_one({"employeeId": employeeId})
                     if not stored:
-                        await websocket.send_json({"success": False, "message": "No encoding"})
+                        await websocket.send_json({"success": False, "message": "Employee face data not found"})
                         continue
 
                     image_array = decode_base64_image(face_b64)
@@ -284,28 +349,19 @@ async def websocket_face(websocket: WebSocket):
                     is_verified = distance <= VERIFICATION_THRESHOLD
 
                     await verification_logs_collection.insert_one({
-                        "userId": user["userId"],
+                        "employeeId": employeeId,
                         "timestamp": datetime.utcnow(),
                         "success": is_verified,
                         "confidence": float(confidence),
                         "distance": float(distance),
-                        "latitude": latitude,
-                        "longitude": longitude,
                     })
-
-                    if is_verified:
-                        await users_collection.update_one(
-                            {"userId": user["userId"]},
-                            {"$set": {"lastVerified": datetime.utcnow()}},
-                        )
 
                     await websocket.send_json({
                         "success": is_verified,
                         "action": "verify",
                         "confidence": round(confidence * 100, 2),
-                        "message": "Verified ✅" if is_verified else "Verification failed ❌",
-                        "userId": user["userId"],
-                        "employeeId": user["employeeId"],
+                        "message": "Verification successful" if is_verified else "Verification failed",
+                        "employeeId": employeeId,
                     })
                 except Exception as e:
                     await websocket.send_json(
